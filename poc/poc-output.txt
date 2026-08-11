@@ -1,0 +1,28 @@
+AvalancheGo external atomic-UTXO accounting PoC
+source: production transaction, codec, credential, and shared-memory paths
+
+Deterministic accounting result
+owners/traits  source UTXO  signed export  signed C import  charged gas
+1              118          335             307               11230
+32             738          955             307               11230
+256            5218         5435            307               11230
+1024           20578        20795           307               11230
+2048           41058        41275           307               11230
+
+Verification benchmark (100 measured repetitions per case)
+owners/traits  average time  average allocated bytes
+1              39.052us      13637
+32             56.184us      18781
+256            259.653us     69086
+1024           913.466us     261490
+2048           1.751879ms    523647
+
+Shared-memory trait-removal benchmark (10 measured repetitions per case)
+owners/traits  average time  average allocated bytes
+1              84.28us       146554
+32             800.249us     425279
+256            5.091948ms    2452804
+1024           20.282815ms   9713625
+2048           36.221831ms   19658402
+
+PASS: every case passed SanityCheck and VerifyCredentials; charged gas stayed constant while external UTXO and trait work increased.
