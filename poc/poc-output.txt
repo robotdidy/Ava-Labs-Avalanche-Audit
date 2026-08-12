@@ -9,20 +9,28 @@ owners/traits  source UTXO  signed export  signed C import  charged gas
 1024           20578        20795           307               11230
 2048           41058        41275           307               11230
 
+Configured SAE accounting parameters
+txpool MinTarget gas/sec: 1000000
+TargetBlockBytes: 1572864
+MaxBlockBytes: 1835008
+2048-owner import: 307 signed bytes (230 unsigned bytes), 11230 gas = 10000 intrinsic + 230 bytes + 1000 signature, 41058 external UTXO bytes, 41275 signed export bytes
+floor(TargetBlockBytes / import bytes): 5123 imports
+same target-byte envelope: 1572761 C import bytes, 210340134 external UTXO bytes, 211451825 signed export bytes
+
 Verification benchmark (100 measured repetitions per case)
 owners/traits  average time  average allocated bytes
-1              39.052us      13637
-32             56.184us      18781
-256            259.653us     69086
-1024           913.466us     261490
-2048           1.751879ms    523647
+1              14.474us      13637
+32             24.276us      18781
+256            104.474us     69085
+1024           349.184us     261474
+2048           719.404us      523646
 
 Shared-memory trait-removal benchmark (10 measured repetitions per case)
 owners/traits  average time  average allocated bytes
-1              84.28us       146554
-32             800.249us     425279
-256            5.091948ms    2452804
-1024           20.282815ms   9713625
-2048           36.221831ms   19658402
+1              54.45us       146559
+32             355.98us      425494
+256            2.03348ms     2452654
+1024           7.76392ms     9714640
+2048           14.89981ms    19666206
 
 PASS: every case passed SanityCheck and VerifyCredentials; charged gas stayed constant while external UTXO and trait work increased.

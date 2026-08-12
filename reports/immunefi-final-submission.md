@@ -64,9 +64,23 @@ The test creates valid threshold-one source UTXOs with the same asset and amount
 
 The largest signed source export remains below the generic 64 KiB transaction-size limit, and the C-Chain import stays at 307 bytes in every case. The external source UTXO grows from 118 bytes to 41,058 bytes, while the gas remains fixed at 11,230.
 
-A representative benchmark of the same `VerifyCredentials()` path used during transaction-pool admission and block processing increased from approximately 33.8 microseconds and 13.6 KB of allocations for one owner to approximately 1.94 milliseconds and 523.6 KB of allocations for 2,048 owners. The exact wall-clock timings vary with the host, but the fixed gas and increasing external work are reproducible.
+The exact accounting parameters are defined in the source. Atomic gas is the
+intrinsic amount plus one gas per serialized unsigned C-Chain byte and 1,000
+gas per signature. The txpool's minimum target gate is `1,000,000` gas, while
+SAE's target and hard block byte limits are `1,572,864` and `1,835,008` bytes.
+The tx-gossip rule requires the serialized transaction-byte share to stay no
+larger than the gas share, and the block builder applies the same serialized
+byte budget to atomic operations. The 2,048-owner import is 307 bytes and
+11,230 gas, but its external UTXO is 41,058 bytes and its signed source export
+is 41,275 bytes. This is 133.74x and 134.45x the C-import size respectively.
+At the configured 1,572,864-byte target envelope, 5,123 of these 307-byte C
+imports represent 210,340,134 external UTXO bytes and 211,451,825 signed
+source-export bytes. This is a serialized-accounting comparison, not a claim
+that all 5,123 transactions can execute in one block.
 
-The shared-memory removal benchmark showed the same pattern. Removing the one-trait value took approximately 139 microseconds and allocated 146 KB, while removing the 2,048-trait value took approximately 35.4 milliseconds and allocated 19.6 MB.
+A representative benchmark of the same `VerifyCredentials()` path used during transaction-pool admission and block processing increased from approximately 17.0 microseconds and 13.6 KB of allocations for one owner to approximately 1.22 milliseconds and 523.7 KB of allocations for 2,048 owners. The exact wall-clock timings vary with the host, but the fixed gas and increasing external work are reproducible.
+
+The shared-memory removal benchmark showed the same pattern. Removing the one-trait value took approximately 48.1 microseconds and allocated 146.6 KB, while removing the 2,048-trait value took approximately 18.2 milliseconds and allocated 19.7 MB.
 
 The important mismatch is therefore:
 
@@ -107,14 +121,14 @@ The measured processing cost increases substantially as the owner list grows:
 
 | Owners | Verification time | Allocated memory |
 |---:|---:|---:|
-| 1 | 33,763 ns/op | 13,636 bytes/op |
-| 2,048 | 1,943,885 ns/op | 523,624 bytes/op |
+| 1 | 17,018 ns/op | 13,637 bytes/op |
+| 2,048 | 1,222,986 ns/op | 523,702 bytes/op |
 
-The shared-memory removal path also increases from 139,026 ns/op and 146,583 bytes for one trait to 35,358,760 ns/op and 19,635,350 bytes for 2,048 traits.
+The shared-memory removal path also increases from 48,089 ns/op and 146,554 bytes for one trait to 18,176,972 ns/op and 19,658,931 bytes for 2,048 traits.
 
 An attacker can submit multiple valid imports, and one import can reference multiple source UTXOs. The unpriced external work therefore compounds across transactions and inputs while each C-Chain transaction continues to appear small and affordable to the mempool.
 
-This consumes CPU time, heap allocations, shared-memory reads, database operations, and block-building capacity on every node that admits or processes the transactions. Those resources are taken from the same processing paths used by legitimate transactions, allowing low-cost attacker transactions to delay normal transaction handling and make nodes process work beyond the parameters used to admit and budget the transactions.
+This consumes CPU time, heap allocations, shared-memory reads, database operations, and block-building capacity on every node that admits or processes the transactions. Those resources are taken from the same processing paths used by legitimate transactions, reducing the processing capacity available to them and making nodes process work beyond the parameters used to admit and budget the transactions. The private-network run confirms the owner-dependent work; it does not claim a measured network-wide delay.
 
 There is no direct theft of user funds in this finding. The affected asset is network processing capacity, and the selected impact is:
 
@@ -141,10 +155,13 @@ Documentation and scope:
 
 PoC attachment:
 
-- `AVA-DO-001_PoC_v2.zip`
+- `AVA-DO-001_PoC_v4.zip`
 - `main.go` (primary standalone runner)
 - `README.md`
 - `poc-output.txt`
+- `atomic-accounting-stress/main.go` (private tmpnet stress runner)
+- `atomic-accounting-stress/README.md`
+- `AVA-DO-001_private_stress_results.txt`
 - `atomic_accounting_benchmark_test.go` (supplemental benchmark)
 
 Related public context reviewed:
@@ -197,15 +214,26 @@ The captured benchmark run reported:
 
 | Owners | Verification time | Verification allocations | Trait-removal time | Trait-removal allocations |
 |---:|---:|---:|---:|---:|
-| 1 | 39.052 µs | 13,637 bytes | 84.28 µs | 146,554 bytes |
-| 2,048 | 1.751879 ms | 523,647 bytes | 36.221831 ms | 19,658,402 bytes |
+| 1 | 14.474 microseconds | 13,637 bytes | 54.45 microseconds | 146,554 bytes |
+| 2,048 | 719.404 microseconds | 523,646 bytes | 14.89981 ms | 19,666,206 bytes |
 
 The deterministic size and gas values are unchanged across runs. The benchmark shows that external verification and shared-memory trait removal grow with the owner and trait count even though the C-Chain transaction size and gas charge remain constant.
+
+The bundle also contains a private-network stress runner. On a local
+four-validator tmpnet, a 16-export one-owner baseline and a 16-export
+2,048-owner attack both completed through the production export, atomic import,
+mempool, and block-processing paths. The captured C-Chain VM verification sums
+were 8.1705 ms for the baseline and 41.542203 ms for the attack case. The
+metric counts and consensus scheduling were not identical, and the ordinary
+transaction submitted during the attack import completed in 269.8 ms versus
+2.09 s in the baseline. This confirms live reachability and owner-dependent
+work, but it is not presented as proof of a network-wide denial of service or
+the program's separate 30-percent resource threshold.
 
 Attached PoC bundle:
 
 ```text
-AVA-DO-001_PoC_v2.zip
+AVA-DO-001_PoC_v4.zip
 ```
 
 The bundle contains:
@@ -214,6 +242,9 @@ The bundle contains:
 main.go
 README.md
 poc-output.txt
+atomic-accounting-stress/main.go
+atomic-accounting-stress/README.md
+AVA-DO-001_private_stress_results.txt
 atomic_accounting_benchmark_test.go
 ```
 

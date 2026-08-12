@@ -1,0 +1,71 @@
+AVA-DO-001 private-network stress validation
+
+Date: 2026-08-12
+Source: AvalancheGo commit be3f61b9caa04a1ff6684fffbc553baad757ceb6
+Network: four-validator tmpnet, process runtime, local API only
+API used: http://127.0.0.1:45169
+Traffic boundary: no Mainnet, Fuji, public RPC, or public peer traffic
+
+The stress runner was executed twice on the same private network. The
+baseline used the pre-funded local EWOQ key and one owner per exported UTXO.
+The attack case used the separate pre-funded local VMRQ key and 2,048 owners
+per exported UTXO. Each case created 16 X-Chain exports, then issued one
+C-Chain atomic import and one ordinary C-Chain transfer during the import.
+Both cases completed successfully through the production wallet, mempool,
+atomic import, and block-processing paths.
+
+Baseline (owners=1, exports=16):
+
+    control_confirmation=79.706892ms
+    import_confirmation=2.122029674s
+    legitimate_during_import=2.092251873s
+    avalanche_meterchainvm_verify_sum{chain="C"}=8.1705e+06 ns
+    avalanche_meterchainvm_verify_count{chain="C"}=2
+    avalanche_meterchainvm_accept_sum{chain="C"}=4.4467e+06 ns
+    avalanche_meterchainvm_accept_count{chain="C"}=2
+    avalanche_meterchainvm_build_block_sum{chain="C"}=3.9852e+06 ns
+    avalanche_meterchainvm_build_block_count{chain="C"}=1
+    avalanche_evm_eth_atomic_mempool_added_txs{chain="C"}=1
+    avalanche_evm_eth_chain_block_executions{chain="C"}=0
+    avalanche_evm_eth_chain_block_gas_used_processed{chain="C"}=21000
+
+Attack (owners=2048, exports=16):
+
+    control_confirmation=89.892285ms
+    import_confirmation=2.22701265s
+    legitimate_during_import=269.846718ms
+    avalanche_meterchainvm_verify_sum{chain="C"}=4.1542203e+07 ns
+    avalanche_meterchainvm_verify_count{chain="C"}=1
+    avalanche_meterchainvm_accept_sum{chain="C"}=1.942691031e+09 ns
+    avalanche_meterchainvm_accept_count{chain="C"}=1
+    avalanche_meterchainvm_build_block_sum{chain="C"}=0 ns
+    avalanche_meterchainvm_build_block_count{chain="C"}=0
+    avalanche_evm_eth_atomic_mempool_added_txs{chain="C"}=1
+    avalanche_evm_eth_chain_block_executions{chain="C"}=25
+    avalanche_evm_eth_chain_block_gas_used_processed{chain="C"}=21000
+
+Interpretation:
+
+The attack run confirms live local reachability through the production
+atomic-import and mempool paths and records a larger aggregate C-Chain VM
+verification value for the owner-heavy case. The metric counts differ between
+the two runs, and acceptance timing includes consensus and scheduling work,
+so those aggregate sums are not presented as an isolated per-transaction CPU
+multiplier. Import confirmation was 2.122 seconds in the baseline and 2.227
+seconds in the attack run. The ordinary transaction submitted during the
+import was not delayed in the attack run (269.8 ms versus 2.09 s baseline).
+
+This run therefore validates production-path reachability and the presence of
+unpriced external work, but it does not establish a reproducible network-wide
+delay, loss of access, or the program's separate 30-percent node-resource
+threshold. The deterministic in-memory PoC remains the clean evidence for the
+fixed 307-byte/11,230-gas import versus the 41,058-byte, 2,048-owner source
+UTXO and the growing verification/removal cost.
+
+Command used for each case (from the WSL AvalancheGo checkout):
+
+    GOTOOLCHAIN=local CGO_ENABLED=1 go run ./cmd/atomic-accounting-stress \
+      -uri=http://127.0.0.1:45169 -mode=baseline -exports=16
+    GOTOOLCHAIN=local CGO_ENABLED=1 go run ./cmd/atomic-accounting-stress \
+      -uri=http://127.0.0.1:45169 -mode=attack -exports=16
+

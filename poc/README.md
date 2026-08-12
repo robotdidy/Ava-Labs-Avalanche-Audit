@@ -41,6 +41,35 @@ owner-count cases.
 The deterministic output is the important result. The timing and allocation
 measurements are local comparative measurements and will vary with the host.
 
+## Defined accounting parameters
+
+The source code gives us an exact resource envelope to compare against; it
+does not define a separate owner-list or shared-memory "compute unit" price.
+For an atomic C-Chain transaction, `gasUsed` is the intrinsic atomic gas plus
+one gas per serialized unsigned C transaction byte and 1,000 gas per
+signature. `AsOp` uses that value for the operation gas. The transaction pool
+admits the operation while its gas is at most `dynamic.MinTarget` (1,000,000).
+
+SAE also defines `TargetBlockBytes` as 1,572,864 bytes (1.5 MiB) and
+`MaxBlockBytes` as 1,835,008 bytes (1.75 MiB). The tx-gossip rule connects a
+transaction's serialized size `y` and gas limit `g` to the live block gas limit
+`x` using `y / TargetBlockBytes <= g / x`. The block builder applies the same
+serialized transaction-byte budget to end-of-block atomic operations.
+
+The 2,048-owner case is 307 signed C-Chain bytes and 11,230 gas, so it passes
+the 1,000,000-gas pool gate. Its external source UTXO is 41,058 bytes and the
+signed source export is 41,275 bytes. Those values are fetched and verified
+before the block builder accounts only for the 307-byte C transaction. The
+ratio is 133.74x for source-UTXO bytes per C-import byte and 134.45x for the
+signed source-export envelope per C-import byte.
+
+For a direct envelope comparison, `floor(1,572,864 / 307) = 5,123` such C
+imports fit within the configured target serialized-byte budget. That same
+budget would represent 1,572,761 C-import bytes but 210,340,134 source-UTXO
+bytes and 211,451,825 signed source-export bytes. This is an accounting
+comparison, not a claim that 5,123 imports can all execute in one block; gas,
+state conflicts, and the live dynamic block limit remain separate constraints.
+
 ## Captured result
 
 The included `poc-output.txt` records one successful run. The deterministic

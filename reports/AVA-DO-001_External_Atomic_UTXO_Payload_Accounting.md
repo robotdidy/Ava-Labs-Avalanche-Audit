@@ -16,12 +16,17 @@ This is a High-scope accounting/admission finding, not a theft or consensus find
 
 ## Scope and severity mapping
 
-The supplied Avalanche DLT scope snapshot (page 6 of `Ava Labs Avalanche Bug Bounties _ Immunefi(SCOPE-blockchain-dlt).pdf`) lists the exact High impact: **"Causing network processing nodes to process transactions from the mempool beyond set parameters."** The same snapshot requires an exploitable path, disproportionate resource use, and a realistic attack scenario (page 3). This report satisfies those conditions at the source/isolated-node level:
+The supplied Avalanche DLT scope snapshot (page 6 of `Ava Labs Avalanche Bug Bounties _ Immunefi(SCOPE-blockchain-dlt).pdf`) lists the exact High impact: **"Causing network processing nodes to process transactions from the mempool beyond set parameters."** The same snapshot requires an exploitable path, disproportionate resource use, and a realistic attack scenario (page 3). The source/isolated-node PoC establishes the vulnerable path, the disproportionate work, and the attacker-controlled input:
 
 - the input is a valid signed atomic import, not malformed traffic;
 - the attacker needs an ordinary X-Chain signing key and a chosen C-Chain destination address, not a validator key, special peer position, or machine access;
 - the external work scales with source UTXO bytes and owner/trait count while the C admission charge does not; and
 - the pool and block-hook paths are public transaction paths used by RPC and gossip.
+
+The current PoC does not claim a network-wide load percentage or a measured
+prevention of legitimate users. Those are separate impact measurements and
+should be demonstrated on a private local network before describing the High
+impact as fully demonstrated.
 
 The scope snapshot excludes network-level TCP/P2P DoS and API panic/OOM testing. No such test was performed. All validation below uses an in-memory shared-memory database and no state-changing Mainnet or Fuji request, consistent with [`avalanchego/SECURITY.md`](avalanchego/SECURITY.md).
 
@@ -85,19 +90,79 @@ All five cases passed `SanityCheck` and `VerifyCredentials`; gas is identical de
 
 The 2,048-owner source value and the complete signed source export are both below the generic [64 KiB transaction-size ceiling](avalanchego/vms/txs/mempool/mempool.go#L23-L26). The filler owners do not need keys; the first owner supplies the one signature required by the threshold-one condition.
 
+### Defined accounting parameters
+
+The source code defines an exact gas/byte envelope, but it does not assign a
+separate compute-unit price to each external owner or shared-memory trait.
+`gasUsed` charges the atomic intrinsic amount, one gas per serialized unsigned
+C-Chain transaction byte, and 1,000 gas per signature; `AsOp` uses that result
+as the operation gas ([`tx.go`](avalanchego/vms/saevm/cchain/tx/tx.go#L140-L200)).
+The txpool admits an operation while its gas is at most
+`dynamic.MinTarget = 1,000,000` ([`txpool.go`](avalanchego/vms/saevm/cchain/txpool/txpool.go#L177-L225),
+[`target.go`](avalanchego/vms/saevm/cchain/dynamic/target.go#L16-L25)).
+
+SAE's exact serialized-byte parameters are `TargetBlockBytes = 1,572,864`
+(1.5 MiB) and `MaxBlockBytes = 1,835,008` (1.75 MiB)
+([`params.go`](avalanchego/vms/saevm/params/params.go#L34-L60)). The tx-gossip
+admission rule for ordinary EVM transactions is `y / TargetBlockBytes <= g / x`,
+where `y` is serialized transaction size, `g` is its gas limit, and `x` is the
+live block gas limit ([`txgossip.go`](avalanchego/vms/saevm/txgossip/txgossip.go#L125-L181)).
+Atomic imports use the separate C-Chain txpool gate above, but the SAE block
+builder applies the same serialized-byte budget to their end-of-block
+operations ([`block_builder.go`](avalanchego/vms/saevm/sae/block_builder.go#L276-L329)).
+The active block gas capacity is dynamic: `SafeMaxBlockSize(rate) = rate *
+TauSeconds * Lambda`, with `TauSeconds = 5` and `Lambda = 2`; at the 4,000,000
+gas target used by the current SAE tests and launch documentation this is an
+80,000,000-gas block limit ([`state.go`](avalanchego/vms/saevm/worstcase/state.go#L89-L158),
+[`vm_test.go`](avalanchego/vms/saevm/sae/vm_test.go#L138-L145)). The old
+`ap5.AtomicGasLimit = 100,000` belongs to the legacy Coreth atomic path; current
+SAE puts these operations in `Header.GasUsed` rather than the retired
+`ExtDataGasUsed` field ([`hooks.go`](avalanchego/vms/saevm/cchain/hooks.go#L395-L410)).
+
+The 2,048-owner case is 307 signed C-Chain bytes and 11,230 gas, so it is far
+below the 1,000,000-gas pool gate. Its external source UTXO is 41,058 bytes and
+the signed source export is 41,275 bytes. The import verifier fetches and
+processes that external data before the block builder accounts only for the
+307-byte C transaction ([`import.go`](avalanchego/vms/saevm/cchain/tx/import.go#L157-L208),
+[`hooks.go`](avalanchego/vms/saevm/cchain/hooks.go#L355-L419)). The external
+source UTXO is therefore 133.74x the C-import size, and the signed source
+export is 134.45x the C-import size, with no change to charged gas.
+
+As a direct envelope comparison, `floor(1,572,864 / 307) = 5,123` such C
+imports fit within the configured target serialized-byte budget. That same
+budget would represent 1,572,761 C-import bytes but 210,340,134 source-UTXO
+bytes and 211,451,825 signed source-export bytes. This is a deterministic
+accounting comparison, not a claim that 5,123 imports can all execute in one
+block; gas, state conflicts, and the live dynamic block limit remain separate
+constraints.
+
+The block gas capacity is dynamic rather than a fixed owner-compute budget.
+`SafeMaxBlockSize(rate)` multiplies the current gas rate by
+`TauSeconds * Lambda = 5 * 2 = 10`; at the 4,000,000-gas target used by the
+current SAE test configuration, the corresponding rate is 8,000,000 and the
+block capacity is 80,000,000 gas ([`state.go`](avalanchego/vms/saevm/worstcase/state.go#L89-L158),
+[`vm_test.go`](avalanchego/vms/saevm/sae/vm_test.go#L138-L145)). The C-Chain
+dedicated pool is constructed with a maximum of 1,024 transactions
+([`vm.go`](avalanchego/vms/saevm/cchain/vm.go#L160-L170)). If that pool held
+1,024 distinct 2,048-owner imports, the C descriptors would total 314,368
+bytes and 11,499,520 gas, while the external source UTXOs would total
+42,043,392 bytes and 2,097,152 trait entries. These are bounded-capacity
+arithmetic figures, not a claim that a public network was filled or that a
+network-wide percentage was measured.
+
 ### Verification benchmark
 
 `BenchmarkAtomicImportExternalPayload` repeatedly executes the same `VerifyCredentials` path that txpool admission and the C block hook execute. Results are from an Intel i5-10210U under WSL and are comparative, not a network-throughput claim.
 
 | owners | ns/op | bytes/op | allocs/op |
 |---:|---:|---:|---:|
-| 1 | 33,763 | 13,636 | 179 |
-| 32 | 83,720 | 18,779 | 274 |
-| 256 | 348,719 | 69,087 | 952 |
-| 1,024 | 981,613 | 261,475 | 3,261 |
-| 2,048 | 1,943,885 | 523,624 | 6,336 |
+| 1 | 14,474 | 13,637 | 179 |
+| 32 | 24,276 | 18,781 | 274 |
+| 256 | 104,474 | 69,085 | 952 |
+| 1,024 | 349,184 | 261,474 | 3,261 |
+| 2,048 | 719,404 | 523,646 | 6,336 |
 
-From 1 to 2,048 owners, verification grows by approximately 57.6x in wall time and 38.4x in allocated bytes in the representative run, while the charged gas remains unchanged. Absolute timings vary with host load; the fixed-gas/external-size relationship and monotonic allocation growth are the reproducible observations.
+From 1 to 2,048 owners, verification grows by approximately 49.7x in wall time and 38.4x in allocated bytes in the captured run, while the charged gas remains unchanged. Absolute timings vary with host load; the fixed-gas/external-size relationship and monotonic allocation growth are the reproducible observations.
 
 ### Acceptance/removal benchmark
 
@@ -105,13 +170,39 @@ From 1 to 2,048 owners, verification grows by approximately 57.6x in wall time a
 
 | owners | ns/op | bytes/op | allocs/op |
 |---:|---:|---:|---:|
-| 1 | 139,026 | 146,583 | 480 |
-| 32 | 691,370 | 425,693 | 3,802 |
-| 256 | 4,860,640 | 2,453,907 | 27,777 |
-| 1,024 | 20,099,521 | 9,713,202 | 109,973 |
-| 2,048 | 35,358,760 | 19,635,350 | 219,567 |
+| 1 | 54,450 | 146,559 | 480 |
+| 32 | 355,980 | 425,494 | 3,802 |
+| 256 | 2,033,480 | 2,452,654 | 27,777 |
+| 1,024 | 7,763,920 | 9,714,640 | 109,973 |
+| 2,048 | 14,899,810 | 19,666,206 | 219,567 |
 
-The measured removal path grows by approximately 254x in time, 134x in allocated bytes, and 457x in allocations from 1 to 2,048 traits. This is acceptance-side evidence of the same unpriced trait dimension; it is not presented as a network-wide denial-of-service measurement.
+The measured removal path grows by approximately 274x in time and 134x in allocated bytes from 1 to 2,048 traits. This is acceptance-side evidence of the same unpriced trait dimension; it is not presented as a network-wide denial-of-service measurement.
+
+### Private-network stress validation
+
+The standalone stress runner was then exercised against a private four-validator
+AvalancheGo tmpnet using only its local API. It ran a paired baseline and attack
+case on the same network. The baseline used 16 exports with one owner each; the
+attack used 16 exports with 2,048 owners each. The baseline and attack used
+different pre-funded local keys so their UTXOs did not overlap. Both cases
+completed the production X-Chain export, C-Chain atomic import, atomic mempool,
+and block-processing paths.
+
+The captured run recorded the following values:
+
+| case | import confirmation | ordinary transfer submitted during import | C-Chain VM verify sum | atomic mempool additions |
+|---|---:|---:|---:|---:|
+| baseline, 1 owner | 2.122029674 s | 2.092251873 s | 8.1705 ms | 1 |
+| attack, 2,048 owners | 2.227012650 s | 269.846718 ms | 41.542203 ms | 1 |
+
+The metric counts differed between the two runs, and acceptance timing includes
+consensus and scheduling work. The aggregate values are therefore not used as
+an isolated per-transaction CPU multiplier. In particular, the ordinary
+transfer was not delayed in the attack run. The stress run confirms live local
+reachability and owner-dependent work in the production path; it does not
+establish a reproducible network-wide delay, loss of access, or the program's
+separate 30-percent node-resource threshold. The complete capture is in
+[`AVA-DO-001_private_stress_results.txt`](AVA-DO-001_private_stress_results.txt).
 
 ## Attacker path and impact
 
@@ -120,7 +211,13 @@ The measured removal path grows by approximately 254x in time, 134x in allocated
 3. The attacker submits a normal signed C-Chain import containing only source UTXO IDs, signature indices, and the one required signature. The C transaction remains small.
 4. The C txpool fetches and verifies the external values. Receiving peers repeat the same work when they admit/gossip the transaction. The block hook re-verifies it before the builder's destination-byte check. Acceptance removes one shared-memory index entry per trait.
 
-The direct impact is disproportionate processing relative to the C transaction's gas, txpool `MinTarget`, and block-byte budget. Multiple distinct source UTXOs can be referenced by one import, so the mismatch is additive; this report deliberately does not assert a maximum number of inputs or a network-wide load percentage without a full private-network stress test.
+The direct impact is disproportionate processing relative to the C transaction's gas, txpool `MinTarget`, and block-byte budget. Multiple distinct source UTXOs can be referenced by one import, so the mismatch is additive; this report deliberately does not assert a maximum number of inputs or a network-wide load percentage because the private stress run did not isolate those limits.
+
+This is not **Modification of transaction fees outside of design parameters**.
+The gas and fee for the C-Chain transaction are calculated by the existing
+formula; the defect is that external UTXO bytes, owner checks, and trait-index
+work are omitted from that formula. Selecting the fee-modification impact
+would describe a different bug.
 
 No direct theft, unauthorized mint, fund freeze, insolvency, validator-key exposure, consensus violation, or chain split was observed. The source UTXO remains authenticated and is consumed normally; the defect is the unpriced work required to process it.
 
@@ -142,9 +239,18 @@ The v1.13.5 release note's generic "C-Chain atomic mempool edge cases" wording w
 
 ## Limitations and maintainer follow-up
 
-- The PoC is an isolated `memdb` benchmark, not a live-network load test. It establishes the accounting defect and reproducible local cost curve, but not the program's separate `>=30%` network-resource threshold.
+- The deterministic PoC and the private tmpnet stress run establish production-path reachability and the reproducible local cost curve, but they do not establish the program's separate `>=30%` network-resource threshold or a consistent delay to legitimate transactions.
 - The source export is signed with the production AVM codec and its owner output passes verification, but the synthetic source UTXO was not executed through a full X-Chain state transition. The measured 41,275-byte signed envelope is below the generic 64 KiB limit; maintainers can run the same owner list through a private X-Chain VM as an additional end-to-end check.
 - The supplied read-only Mainnet snapshot recorded `avalanchego/1.14.2` and live X-Chain `txFee = 0.001 AVAX`, while the source checkout is commit `be3f61b9ca`. The live node reported a different build commit (`d6a342ba...`); maintainers should match the exact deployed release artifact before assigning final bounty severity.
 - No Mainnet or Fuji transaction was sent. Any further validation should use a private local network only, in accordance with `SECURITY.md`.
 
-**Submission recommendation:** submit this as one High-severity AvalancheGo report under the mempool-beyond-set-parameters category, with the standalone runner, README, captured output, and supplemental benchmark test attached. State the exact measured results above, explicitly distinguish issue/PR #5468/#5549, and do not claim a Critical impact or a network-wide percentage that has not been measured.
+**Submission recommendation:** the code-path finding is reproducible and the
+private network confirms that the external payload is reached by production
+import/mempool processing. The current stress capture does not show a consistent
+legitimate-transaction delay or the program's separate `>=30%` resource
+threshold, so it is not sufficient by itself to make the High impact
+un-rejectable. Do not select the Low fee-modification category: it does not
+match the observed behavior. If submitting, attach the standalone runner,
+private stress capture, and supplemental benchmark test; explicitly distinguish
+issue/PR #5468/#5549; and do not claim a Critical impact or a network-wide
+percentage that has not been measured.

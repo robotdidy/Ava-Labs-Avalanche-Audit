@@ -25,6 +25,8 @@ run:
 GOTOOLCHAIN=local CGO_ENABLED=1 go run ./cmd/atomic-accounting-poc
 ```
 
-The full bundle and captured output are in `poc/`. The runner uses a local
-in-memory shared-memory database and makes no Mainnet, Fuji, RPC, or peer
+The full deterministic bundle and captured output are in `poc/`. The updated
+v4 bundle also includes `poc/atomic-accounting-stress/`, a private four-node
+tmpnet stress runner, and `poc/AVA-DO-001_private_stress_results.txt`. Both
+runners are local-only and make no Mainnet, Fuji, public RPC, or public peer
 network requests.

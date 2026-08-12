@@ -62,18 +62,20 @@ func accountingOwners(addr ids.ShortID, count int) []ids.ShortID {
 func newAccountingCase(tb testing.TB, ownerCount int) accountingCase {
 	tb.Helper()
 	const (
-		inputAmount  = uint64(2_000_000)
-		outputAmount = uint64(1_000_000)
+		sourceInputAmount = uint64(3_000_000)
+		inputAmount       = uint64(2_000_000)
+		outputAmount      = uint64(1_000_000)
 	)
 
 	sk, err := secp256k1.ToPrivateKey(common.FromHex("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"))
 	require.NoError(tb, err)
 
 	owners := accountingOwners(sk.Address(), ownerCount)
-	utxoID := avax.UTXOID{TxID: ids.GenerateTestID()}
+	// The export spends 3,000,000 nAVAX and creates the 2,000,000 nAVAX UTXO
+	// imported by C-Chain. The difference models the X-Chain transaction fee.
+	exportInputID := avax.UTXOID{TxID: ids.GenerateTestID()}
 	utxo := &avax.UTXO{
-		UTXOID: utxoID,
-		Asset:  avax.Asset{ID: accountingAssetID},
+		Asset: avax.Asset{ID: accountingAssetID},
 		Out: &secp256k1fx.TransferOutput{
 			Amt: inputAmount,
 			OutputOwners: secp256k1fx.OutputOwners{
@@ -82,13 +84,11 @@ func newAccountingCase(tb testing.TB, ownerCount int) accountingCase {
 			},
 		},
 	}
-	require.NoError(tb, utxo.Verify())
-
-	input := &avax.TransferableInput{
-		UTXOID: utxoID,
+	exportInput := &avax.TransferableInput{
+		UTXOID: exportInputID,
 		Asset:  avax.Asset{ID: accountingAssetID},
 		In: &secp256k1fx.TransferInput{
-			Amt: inputAmount,
+			Amt: sourceInputAmount,
 			Input: secp256k1fx.Input{
 				// accountingOwners puts the signing address at index zero.
 				SigIndices: []uint32{0},
@@ -99,7 +99,7 @@ func newAccountingCase(tb testing.TB, ownerCount int) accountingCase {
 		BaseTx: avmtxs.BaseTx{BaseTx: avax.BaseTx{
 			NetworkID:    constants.MainnetID,
 			BlockchainID: accountingXChainID,
-			Ins:          []*avax.TransferableInput{input},
+			Ins:          []*avax.TransferableInput{exportInput},
 		}},
 		DestinationChain: accountingCChainID,
 		ExportedOuts: []*avax.TransferableOutput{{
@@ -117,11 +117,27 @@ func newAccountingCase(tb testing.TB, ownerCount int) accountingCase {
 	exportBytes := signedExport.Bytes()
 	require.Greater(tb, len(exportBytes), len(unsignedExportBytes))
 	require.Less(tb, len(exportBytes), 64*1024)
+
+	// AVM assigns exported outputs after the regular BaseTx outputs. Use the
+	// signed export ID to form the source UTXO consumed by the C import.
+	utxoID := avax.UTXOID{TxID: signedExport.ID(), OutputIndex: uint32(len(exportTx.Outs))}
+	utxo.UTXOID = utxoID
+	require.NoError(tb, utxo.Verify())
+	importInput := &avax.TransferableInput{
+		UTXOID: utxoID,
+		Asset:  avax.Asset{ID: accountingAssetID},
+		In: &secp256k1fx.TransferInput{
+			Amt: inputAmount,
+			Input: secp256k1fx.Input{
+				SigIndices: []uint32{0},
+			},
+		},
+	}
 	unsigned := &cctxtx.Import{
 		NetworkID:      constants.MainnetID,
 		BlockchainID:   accountingCChainID,
 		SourceChain:    accountingXChainID,
-		ImportedInputs: []*avax.TransferableInput{input},
+		ImportedInputs: []*avax.TransferableInput{importInput},
 		Outs: []cctxtx.Output{{
 			Address: common.Address{1},
 			Amount:  outputAmount,

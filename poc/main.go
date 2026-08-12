@@ -21,7 +21,9 @@ import (
 	"github.com/ava-labs/avalanchego/vms/avm/fxs"
 	avmtxs "github.com/ava-labs/avalanchego/vms/avm/txs"
 	"github.com/ava-labs/avalanchego/vms/components/avax"
+	"github.com/ava-labs/avalanchego/vms/saevm/cchain/dynamic"
 	cctxtx "github.com/ava-labs/avalanchego/vms/saevm/cchain/tx"
+	saeparams "github.com/ava-labs/avalanchego/vms/saevm/params"
 	"github.com/ava-labs/avalanchego/vms/secp256k1fx"
 )
 
@@ -32,19 +34,21 @@ var (
 )
 
 const (
-	inputAmount  = uint64(2_000_000)
-	outputAmount = uint64(1_000_000)
-	maxExport    = 64 * 1024
+	sourceInputAmount = uint64(3_000_000)
+	inputAmount       = uint64(2_000_000)
+	outputAmount      = uint64(1_000_000)
+	maxExport         = 64 * 1024
 )
 
 type accountingCase struct {
-	tx          *cctxtx.Tx
-	destination chainsatomic.SharedMemory
-	utxoBytes   []byte
-	exportBytes []byte
-	importBytes []byte
-	gas         uint64
-	traits      int
+	tx                  *cctxtx.Tx
+	destination         chainsatomic.SharedMemory
+	utxoBytes           []byte
+	exportBytes         []byte
+	unsignedImportBytes int
+	importBytes         []byte
+	gas                 uint64
+	traits              int
 }
 
 type removalSample struct {
@@ -85,6 +89,27 @@ func run() error {
 		}
 		fmt.Printf("%d\t\t%d\t\t%d\t\t%d\t\t%d\n", c.traits, len(c.utxoBytes), len(c.exportBytes), len(c.importBytes), c.gas)
 	}
+
+	// Compare the largest deterministic case with the exact SAE accounting
+	// parameters used by txpool admission and block construction. This is a
+	// byte/gas envelope comparison, not a claim that the calculated number of
+	// imports can all be included in one block despite gas and state conflicts.
+	largest, err := newAccountingCase(2048)
+	if err != nil {
+		return fmt.Errorf("parameter comparison setup: %w", err)
+	}
+	importsAtTargetBytes := saeparams.TargetBlockBytes / uint64(len(largest.importBytes))
+	externalUTXOBytes := importsAtTargetBytes * uint64(len(largest.utxoBytes))
+	externalExportBytes := importsAtTargetBytes * uint64(len(largest.exportBytes))
+	cImportBytes := importsAtTargetBytes * uint64(len(largest.importBytes))
+	fmt.Println()
+	fmt.Println("Configured SAE accounting parameters")
+	fmt.Printf("txpool MinTarget gas/sec: %d\n", dynamic.MinTarget)
+	fmt.Printf("TargetBlockBytes: %d\n", saeparams.TargetBlockBytes)
+	fmt.Printf("MaxBlockBytes: %d\n", saeparams.MaxBlockBytes)
+	fmt.Printf("2048-owner import: %d signed bytes (%d unsigned bytes), %d gas = 10000 intrinsic + %d bytes + 1000 signature, %d external UTXO bytes, %d signed export bytes\n", len(largest.importBytes), largest.unsignedImportBytes, largest.gas, largest.unsignedImportBytes, len(largest.utxoBytes), len(largest.exportBytes))
+	fmt.Printf("floor(TargetBlockBytes / import bytes): %d imports\n", importsAtTargetBytes)
+	fmt.Printf("same target-byte envelope: %d C import bytes, %d external UTXO bytes, %d signed export bytes\n", cImportBytes, externalUTXOBytes, externalExportBytes)
 
 	fmt.Println()
 	fmt.Println("Verification benchmark (100 measured repetitions per case)")
@@ -142,10 +167,11 @@ func newAccountingCase(ownerCount int) (accountingCase, error) {
 	}
 
 	owners := accountingOwners(sk.Address(), ownerCount)
-	utxoID := avax.UTXOID{TxID: ids.GenerateTestID()}
+	// The export spends 3,000,000 nAVAX and creates the 2,000,000 nAVAX UTXO
+	// imported by C-Chain. The difference models the X-Chain transaction fee.
+	exportInputID := avax.UTXOID{TxID: ids.GenerateTestID()}
 	utxo := &avax.UTXO{
-		UTXOID: utxoID,
-		Asset:  avax.Asset{ID: accountingAssetID},
+		Asset: avax.Asset{ID: accountingAssetID},
 		Out: &secp256k1fx.TransferOutput{
 			Amt: inputAmount,
 			OutputOwners: secp256k1fx.OutputOwners{
@@ -154,15 +180,11 @@ func newAccountingCase(ownerCount int) (accountingCase, error) {
 			},
 		},
 	}
-	if err := utxo.Verify(); err != nil {
-		return accountingCase{}, fmt.Errorf("UTXO verification: %w", err)
-	}
-
-	input := &avax.TransferableInput{
-		UTXOID: utxoID,
+	exportInput := &avax.TransferableInput{
+		UTXOID: exportInputID,
 		Asset:  avax.Asset{ID: accountingAssetID},
 		In: &secp256k1fx.TransferInput{
-			Amt: inputAmount,
+			Amt: sourceInputAmount,
 			Input: secp256k1fx.Input{
 				SigIndices: []uint32{0},
 			},
@@ -173,7 +195,7 @@ func newAccountingCase(ownerCount int) (accountingCase, error) {
 		BaseTx: avmtxs.BaseTx{BaseTx: avax.BaseTx{
 			NetworkID:    constants.MainnetID,
 			BlockchainID: accountingXChainID,
-			Ins:          []*avax.TransferableInput{input},
+			Ins:          []*avax.TransferableInput{exportInput},
 		}},
 		DestinationChain: accountingCChainID,
 		ExportedOuts: []*avax.TransferableOutput{{
@@ -199,11 +221,29 @@ func newAccountingCase(ownerCount int) (accountingCase, error) {
 		return accountingCase{}, fmt.Errorf("signed export size %d is outside expected range", len(exportBytes))
 	}
 
+	// AVM assigns exported outputs after the regular BaseTx outputs. Use the
+	// signed export ID to form the source UTXO consumed by the C import.
+	utxoID := avax.UTXOID{TxID: signedExport.ID(), OutputIndex: uint32(len(exportTx.Outs))}
+	utxo.UTXOID = utxoID
+	if err := utxo.Verify(); err != nil {
+		return accountingCase{}, fmt.Errorf("UTXO verification: %w", err)
+	}
+	importInput := &avax.TransferableInput{
+		UTXOID: utxoID,
+		Asset:  avax.Asset{ID: accountingAssetID},
+		In: &secp256k1fx.TransferInput{
+			Amt: inputAmount,
+			Input: secp256k1fx.Input{
+				SigIndices: []uint32{0},
+			},
+		},
+	}
+
 	unsigned := &cctxtx.Import{
 		NetworkID:      constants.MainnetID,
 		BlockchainID:   accountingCChainID,
 		SourceChain:    accountingXChainID,
-		ImportedInputs: []*avax.TransferableInput{input},
+		ImportedInputs: []*avax.TransferableInput{importInput},
 		Outs: []cctxtx.Output{{
 			Address: common.Address{1},
 			Amount:  outputAmount,
@@ -276,13 +316,14 @@ func newAccountingCase(ownerCount int) (accountingCase, error) {
 	}
 
 	return accountingCase{
-		tx:          tx,
-		destination: destination,
-		utxoBytes:   utxoBytes,
-		exportBytes: exportBytes,
-		importBytes: importBytes,
-		gas:         uint64(op.Gas),
-		traits:      len(addressable.Addresses()),
+		tx:                  tx,
+		destination:         destination,
+		utxoBytes:           utxoBytes,
+		exportBytes:         exportBytes,
+		unsignedImportBytes: len(unsignedBytes),
+		importBytes:         importBytes,
+		gas:                 uint64(op.Gas),
+		traits:              len(addressable.Addresses()),
 	}, nil
 }
 
